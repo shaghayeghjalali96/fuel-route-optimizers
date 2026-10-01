@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+db.sqlite3
+.env
+.venv/
+venv/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/
+wheels/
+.cache/
+data/plotly_us_cities.csv
+data/us_cities_full.csv

@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FuelRoute — cheapest stops</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&family=Literata:opsz,wght@7..72,500;7..72,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root {
+      --bg: #eef3f0;
+      --panel: #ffffff;
+      --ink: #14231c;
+      --muted: #5c6f65;
+      --line: #d5e0d9;
+      --brand: #0f6b4c;
+      --accent: #d97706;
+      --good: #0f6b4c;
+      --shadow: 0 10px 30px rgba(20, 35, 28, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: "Outfit", sans-serif;
+      background:
+        radial-gradient(900px 400px at 10% -10%, #d9efe4 0%, transparent 55%),
+        radial-gradient(700px 380px at 100% 0%, #ffe8c7 0%, transparent 45%),
+        var(--bg);
+    }
+    .app {
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) 1fr;
+      min-height: 100vh;
+    }
+    .sidebar {
+      padding: 1.25rem;
+      border-right: 1px solid var(--line);
+      background: rgba(255,255,255,0.72);
+      backdrop-filter: blur(8px);
+      overflow: auto;
+    }
+    .brand {
+      font-family: "Literata", serif;
+      font-size: 1.7rem;
+      margin: 0 0 0.25rem;
+      letter-spacing: -0.02em;
+    }
+    .tagline {
+      margin: 0 0 1.1rem;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    form {
+      display: grid;
+      gap: 0.75rem;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 1rem;
+      box-shadow: var(--shadow);
+    }
+    label {
+      display: grid;
+      gap: 0.35rem;
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+    input {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.75rem 0.85rem;
+      font: inherit;
+      color: var(--ink);
+      background: #fbfcfb;
+    }
+    input:focus {
+      outline: 2px solid rgba(15, 107, 76, 0.25);
+      border-color: var(--brand);
+    }
+    .examples {
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin-top: -0.15rem;
+    }
+    .examples code {
+      background: #eef6f1;
+      padding: 0.1rem 0.35rem;
+      border-radius: 6px;
+      color: var(--brand);
+    }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 0.9rem 1rem;
+      font: inherit;
+      font-weight: 700;
+      color: white;
+      background: linear-gradient(135deg, #0f6b4c, #168a61);
+      cursor: pointer;
+      box-shadow: 0 8px 18px rgba(15, 107, 76, 0.25);
+    }
+    button:hover { filter: brightness(1.05); }
+    button:disabled { opacity: 0.65; cursor: wait; }
+    .error {
+      margin-top: 0.85rem;
+      color: #9f1239;
+      background: #fff1f2;
+      border: 1px solid #fecdd3;
+      border-radius: 12px;
+      padding: 0.75rem 0.9rem;
+      display: none;
+    }
+    .error.show { display: block; }
+    .totals {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.55rem;
+      margin: 1rem 0 0.75rem;
+    }
+    .totals div {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 0.75rem 0.5rem;
+      text-align: center;
+      box-shadow: var(--shadow);
+    }
+    .totals span {
+      display: block;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .totals b {
+      display: block;
+      margin-top: 0.25rem;
+      font-size: 1.05rem;
+    }
+    .totals .cost b { color: var(--brand); }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .panel h2 {
+      margin: 0;
+      padding: 0.85rem 1rem;
+      font-size: 0.95rem;
+      border-bottom: 1px solid var(--line);
+    }
+    .stop {
+      padding: 0.9rem 1rem;
+      border-bottom: 1px solid var(--line);
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.15s ease;
+    }
+    .stop:last-child { border-bottom: 0; }
+    .stop:hover, .stop.active {
+      background: #f3faf6;
+    }
+    .stop .top {
+      display: flex;
+      gap: 0.65rem;
+      align-items: flex-start;
+    }
+    .badge {
+      flex: 0 0 auto;
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.85rem;
+    }
+    .stop .title { font-weight: 700; }
+    .stop .meta {
+      margin-top: 0.25rem;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+    .stop .price {
+      margin-top: 0.45rem;
+      font-size: 0.92rem;
+    }
+    .stop .why {
+      margin-top: 0.4rem;
+      font-size: 0.8rem;
+      color: #6b7280;
+    }
+    .help {
+      margin-top: 1rem;
+      padding: 0.9rem 1rem;
+      border-radius: 16px;
+      border: 1px dashed var(--line);
+      background: rgba(255,255,255,0.55);
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+    .help strong { color: var(--ink); }
+    .map-wrap {
+      position: relative;
+      min-height: 100vh;
+    }
+    #map { position: absolute; inset: 0; }
+    .map-empty {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      z-index: 500;
+      pointer-events: none;
+      color: var(--muted);
+      font-size: 1.05rem;
+      background: linear-gradient(180deg, rgba(238,243,240,0.2), rgba(238,243,240,0.55));
+    }
+    .map-empty.hide { display: none; }
+    .leaflet-popup-content { font-family: "Outfit", sans-serif; }
+    .pin {
+      background: var(--accent);
+      color: #fff;
+      width: 28px;
+      height: 28px;
+      border-radius: 50% 50% 50% 0;
+      transform: rotate(-45deg);
+      border: 2px solid #fff;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.25);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 0.75rem;
+    }
+    .pin span { transform: rotate(45deg); }
+    .pin.start, .pin.finish {
+      background: var(--brand);
+      border-radius: 50%;
+      transform: none;
+    }
+    .pin.start span, .pin.finish span { transform: none; }
+    .hidden { display: none !important; }
+    @media (max-width: 900px) {
+      .app { grid-template-columns: 1fr; }
+      .map-wrap { min-height: 48vh; order: -1; }
+      .sidebar { border-right: 0; border-top: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h1 class="brand">FuelRoute</h1>
+      <p class="tagline">Cheapest fuel stops along your US drive — 500 mi tank, 10 mpg.</p>
+
+      <form id="form">
+        <label>From
+          <input name="start" value="Chicago, IL" required placeholder="City, ST or full address" />
+        </label>
+        <label>To
+          <input name="finish" value="Dallas, TX" required placeholder="City, ST or full address" />
+        </label>
+        <div class="examples">
+          Fast: <code>Chicago, IL</code> &nbsp; Detailed: <code>Millennium Park, Chicago, IL</code>
+        </div>
+        <button type="submit" id="go">Find cheapest stops</button>
+      </form>
+
+      <div id="error" class="error"></div>
+
+      <div id="results" class="hidden">
+        <div class="totals">
+          <div><span>Distance</span><b id="miles">-</b></div>
+          <div><span>Gallons</span><b id="gallons">-</b></div>
+          <div class="cost"><span>Total cost</span><b id="cost">-</b></div>
+        </div>
+
+        <div class="panel">
+          <h2>Fuel stops — tap a row to zoom the map</h2>
+          <div id="stop-list"></div>
+        </div>
+      </div>
+
+      <div class="help">
+        <strong>How it works:</strong> We load fuel prices from the CSV, place each station
+        near its city, draw one driving route, then pick the lowest $/gal stops you can
+        reach before the tank runs empty.
+      </div>
+    </aside>
+
+    <section class="map-wrap">
+      <div id="map"></div>
+      <div id="map-empty" class="map-empty">Your route and fuel stops will appear here</div>
+    </section>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    function decodePolyline(str) {
+      let index = 0, lat = 0, lng = 0, coordinates = [];
+      while (index < str.length) {
+        for (let i = 0; i < 2; i++) {
+          let result = 0, shift = 0, b;
+          do {
+            b = str.charCodeAt(index++) - 63;
+            result |= (b & 0x1f) << shift;
+            shift += 5;
+          } while (b >= 0x20);
+          const delta = (result & 1) ? ~(result >> 1) : (result >> 1);
+          if (i === 0) lat += delta; else lng += delta;
+        }
+        coordinates.push([lat / 1e5, lng / 1e5]);
+      }
+      return coordinates;
+    }
+
+    function makePin(label, cls) {
+      return L.divIcon({
+        className: "",
+        html: `<div class="pin ${cls || ""}"><span>${label}</span></div>`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 28],
+        popupAnchor: [0, -24],
+      });
+    }
+
+    const map = L.map("map", { zoomControl: true }).setView([39.5, -98.35], 4);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 18,
+      attribution: "&copy; OpenStreetMap",
+    }).addTo(map);
+    const layerGroup = L.layerGroup().addTo(map);
+    const markersByStop = {};
+
+    const form = document.getElementById("form");
+    const errorEl = document.getElementById("error");
+    const results = document.getElementById("results");
+    const mapEmpty = document.getElementById("map-empty");
+    const go = document.getElementById("go");
+
+    function showError(msg) {
+      errorEl.textContent = msg;
+      errorEl.classList.add("show");
+    }
+
+    function focusStop(num) {
+      document.querySelectorAll(".stop").forEach((el) => {
+        el.classList.toggle("active", Number(el.dataset.stop) === num);
+      });
+      const m = markersByStop[num];
+      if (!m) return;
+      map.flyTo(m.getLatLng(), Math.max(map.getZoom(), 8), { duration: 0.7 });
+      m.openPopup();
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorEl.classList.remove("show");
+      results.classList.add("hidden");
+      go.disabled = true;
+      go.textContent = "Searching...";
+
+      const start = form.start.value.trim();
+      const finish = form.finish.value.trim();
+
+      try {
+        const t0 = performance.now();
+        const res = await fetch(
+          `/api/route/?start=${encodeURIComponent(start)}&finish=${encodeURIComponent(finish)}`
+        );
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Request failed");
+
+        document.getElementById("miles").textContent = data.route.distance_miles + " mi";
+        document.getElementById("gallons").textContent = data.fuel_plan.gallons_needed + " gal";
+        document.getElementById("cost").textContent = data.fuel_plan.total_fuel_cost_text;
+
+        const stops = data.fuel_plan.fuel_stops || [];
+        const list = document.getElementById("stop-list");
+        list.innerHTML = stops.length
+          ? stops.map((s) => `
+              <div class="stop" data-stop="${s.stop_number}">
+                <div class="top">
+                  <div class="badge">${s.stop_number}</div>
+                  <div>
+                    <div class="title">${s.station_name}</div>
+                    <div class="meta">${s.location} · mile ${s.miles_from_start}</div>
+                    <div class="meta">${s.highway_address}</div>
+                    <div class="price">
+                      <strong>$${s.price_per_gallon_usd.toFixed(3)}/gal</strong>
+                      · buy ${s.gallons_to_buy} gal
+                      · <strong>$${s.cost_at_this_stop_usd.toFixed(2)}</strong>
+                    </div>
+                    ${s.why_this_stop ? `<div class="why">${s.why_this_stop}</div>` : ""}
+                  </div>
+                </div>
+              </div>
+            `).join("")
+          : `<div class="stop"><div class="title">No fuel stops needed</div></div>`;
+
+        list.querySelectorAll(".stop[data-stop]").forEach((el) => {
+          el.addEventListener("click", () => focusStop(Number(el.dataset.stop)));
+          el.addEventListener("mouseenter", () => {
+            const m = markersByStop[Number(el.dataset.stop)];
+            if (m) m.openPopup();
+          });
+        });
+
+        results.classList.remove("hidden");
+        mapEmpty.classList.add("hide");
+        layerGroup.clearLayers();
+        Object.keys(markersByStop).forEach((k) => delete markersByStop[k]);
+
+        const latlngs = decodePolyline(data.route.polyline);
+        const line = L.polyline(latlngs, {
+          color: "#0f6b4c",
+          weight: 5,
+          opacity: 0.9,
+        }).addTo(layerGroup);
+
+        L.marker([data.start.latitude, data.start.longitude], {
+          icon: makePin("A", "start"),
+        })
+          .bindPopup(`<strong>Start</strong><br/>${start}`)
+          .addTo(layerGroup);
+
+        L.marker([data.finish.latitude, data.finish.longitude], {
+          icon: makePin("B", "finish"),
+        })
+          .bindPopup(`<strong>Finish</strong><br/>${finish}`)
+          .addTo(layerGroup);
+
+        stops.forEach((s) => {
+          const marker = L.marker(
+            [s.coordinates.latitude, s.coordinates.longitude],
+            { icon: makePin(String(s.stop_number)) }
+          )
+            .bindPopup(
+              `<strong>${s.stop_number}. ${s.station_name}</strong><br/>` +
+              `${s.location}<br/>$${s.price_per_gallon_usd.toFixed(3)}/gal` +
+              `<br/>Buy ${s.gallons_to_buy} gal · $${s.cost_at_this_stop_usd.toFixed(2)}` +
+              `<br/><em>Click the list item to zoom here</em>`
+            )
+            .addTo(layerGroup);
+          marker.on("click", () => focusStop(s.stop_number));
+          markersByStop[s.stop_number] = marker;
+        });
+
+        map.fitBounds(line.getBounds(), { padding: [40, 40] });
+        const ms = Math.round(performance.now() - t0);
+        const apiCalls = data.cache?.external_api_calls ?? "?";
+        go.textContent = `Done in ${ms} ms · ${apiCalls} API call(s)`;
+        setTimeout(() => { go.textContent = "Find cheapest stops"; }, 2500);
+      } catch (err) {
+        showError(err.message);
+        go.textContent = "Find cheapest stops";
+      } finally {
+        go.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
