@@ -126,18 +126,28 @@ def plan_fuel_stops(
     max_range: float | None = None,
     mpg: float | None = None,
     reserve_miles: float | None = None,
+    start_range_miles: float | None = None,
 ) -> tuple[list[FuelStop], float, float]:
     """
-    Minimize fuel spend using retail prices, while respecting the 500-mile tank.
+    Pick the cheapest fuel stops needed to finish the trip.
+
+    - Starts with the fuel the driver already has (``start_range_miles``).
+    - Once the fuel on board can reach the destination, planning stops: no
+      stop is ever added after the driver can already make it.
+    - Only fuel that is actually bought is counted toward the cost.
     """
     max_range = max_range if max_range is not None else settings.VEHICLE_MAX_RANGE_MILES
     mpg = mpg if mpg is not None else settings.VEHICLE_MPG
     reserve = reserve_miles if reserve_miles is not None else settings.FUEL_RESERVE_MILES
-    usable = max(max_range - reserve, max_range * 0.5)
+    full = float(max_range)
+    # Distance we are willing to cover on one leg before refueling (safety margin).
+    usable = max(full - reserve, full * 0.5)
 
-    gallons_consumed = total_distance_miles / mpg
+    gallons_for_trip = round(total_distance_miles / mpg, 2)
     if total_distance_miles <= 0:
         return [], 0.0, 0.0
+
+    range_left = full if start_range_miles is None else max(0.0, min(float(start_range_miles), full))
 
     stations = _dedupe_nearby(route_stations)
     if not stations:
@@ -146,108 +156,79 @@ def plan_fuel_stops(
             "Run: python manage.py load_stations --replace"
         )
 
-    if total_distance_miles <= usable:
-        best = min(stations, key=_price)
-        cost = gallons_consumed * _price(best)
-        return (
-            [
-                FuelStop(
-                    station=best.station,
-                    distance_along_miles=best.distance_along_miles,
-                    gallons=round(gallons_consumed, 2),
-                    cost_usd=round(cost, 2),
-                    remaining_range_after_miles=max_range,
-                    reason="Cheapest station on this route (trip fits in one tank).",
-                )
-            ],
-            round(cost, 2),
-            round(gallons_consumed, 2),
-        )
-
-    remaining_range = float(max_range)
     position = 0.0
     stops: list[FuelStop] = []
     total_cost = 0.0
 
-    for _ in range(200):
-        if position + remaining_range >= total_distance_miles - 1e-6:
+    for _ in range(500):
+        # Enough fuel on board to reach the destination → done, no extra stop.
+        if range_left >= (total_distance_miles - position) - 1e-6:
             break
 
-        reach = position + remaining_range
+        reach = position + min(range_left, usable)
         reachable = _reachable(stations, position, reach)
         if not reachable:
             raise ValueError(
-                "Cannot reach a fuel station before the tank runs out "
-                f"(around mile {position:.0f} of {total_distance_miles:.0f})."
+                "Cannot reach a fuel station before fuel runs out "
+                f"(around mile {position:.0f} of {total_distance_miles:.0f}). "
+                "Start with more fuel in the tank."
             )
 
-        viable = [
-            s
-            for s in reachable
-            if _can_continue(s, stations, total_distance_miles, max_range)
-        ]
+        viable = [s for s in reachable if _can_continue(s, stations, total_distance_miles, usable)]
         pool = viable or reachable
         chosen = min(pool, key=lambda s: (_price(s), -s.distance_along_miles))
 
-        miles_to_stop = chosen.distance_along_miles - position
-        remaining_range -= miles_to_stop
+        range_left -= chosen.distance_along_miles - position
         position = chosen.distance_along_miles
         price = _price(chosen)
 
-        ahead_reach = position + max_range
-        ahead = [
-            s
-            for s in stations
-            if position < s.distance_along_miles <= ahead_reach
-            and _can_continue(s, stations, total_distance_miles, max_range)
-        ]
-        cheaper_ahead = [s for s in ahead if _price(s) < price - 1e-9]
+        remaining_trip = total_distance_miles - position
 
-        if cheaper_ahead:
-            target = min(cheaper_ahead, key=lambda s: s.distance_along_miles)
-            miles_needed = target.distance_along_miles - position
-            gallons_needed = max(0.0, (miles_needed - remaining_range) / mpg)
-            gallons_needed = max(gallons_needed, 1.0 / mpg)
-            reason = (
-                f"Cheapest reachable now (${price:.3f}/gal); "
-                f"buying only enough to reach cheaper fuel ahead "
-                f"(${_price(target):.3f}/gal)."
-            )
-            remaining_range = remaining_range + gallons_needed * mpg
+        if remaining_trip <= full + 1e-6:
+            # Destination is reachable on this one fill → last stop. Buy just
+            # enough to get there instead of adding another stop for pennies.
+            need_range = remaining_trip
+            reason = "Last stop; buy enough to reach the destination."
         else:
-            gallons_needed = max(0.0, (max_range - remaining_range) / mpg)
-            reason = (
-                f"Lowest price in range (${price:.3f}/gal); "
-                "filling up because later stations are not cheaper."
-            )
-            remaining_range = max_range
+            ahead = [
+                s
+                for s in stations
+                if position < s.distance_along_miles <= position + usable
+                and _can_continue(s, stations, total_distance_miles, usable)
+            ]
+            cheaper_ahead = [s for s in ahead if _price(s) < price - 1e-9]
+            if cheaper_ahead:
+                target = min(cheaper_ahead, key=lambda s: s.distance_along_miles)
+                need_range = target.distance_along_miles - position
+                reason = "Cheapest nearby; buy enough to reach cheaper fuel ahead."
+            else:
+                need_range = full
+                reason = "Cheapest nearby; fill up here."
 
-        gallons_needed = min(gallons_needed, max_range / mpg)
-        cost = gallons_needed * price
+        buy_range = max(0.0, need_range - range_left)
+        if buy_range <= 1e-6:
+            buy_range = min(full, remaining_trip) - range_left
+        if buy_range <= 1e-6:
+            break
+
+        gallons = max(round(buy_range / mpg, 2), 0.01)
+        range_left += buy_range
+        cost = round(gallons * price, 2)
         total_cost += cost
         stops.append(
             FuelStop(
                 station=chosen.station,
                 distance_along_miles=position,
-                gallons=round(gallons_needed, 2),
-                cost_usd=round(cost, 2),
-                remaining_range_after_miles=round(remaining_range, 1),
+                gallons=gallons,
+                cost_usd=cost,
+                remaining_range_after_miles=round(range_left, 1),
                 reason=reason,
             )
         )
     else:
         raise ValueError("Fuel planning failed; check station coverage along the route.")
 
-    purchased = sum(s.gallons for s in stops)
-    if purchased + 1e-6 < gallons_consumed and stops:
-        missing = gallons_consumed - purchased
-        best_stop = min(stops, key=lambda s: s.station.retail_price)
-        best_stop.gallons = round(best_stop.gallons + missing, 2)
-        extra = missing * best_stop.station.retail_price
-        best_stop.cost_usd = round(best_stop.cost_usd + extra, 2)
-        total_cost += extra
-
-    return stops, round(total_cost, 2), round(gallons_consumed, 2)
+    return stops, round(total_cost, 2), gallons_for_trip
 
 
 def serialize_stop(stop: FuelStop) -> dict:

@@ -14,10 +14,12 @@ from django.views.decorators.csrf import csrf_exempt
 
 from fuelroute.services.external import ExternalServiceError, fetch_route, geocode_place
 from fuelroute.services.planner import plan_fuel_stops, serialize_stop, stations_along_route
+from fuelroute.services.station_index import get_geocoded_stations
 
 logger = logging.getLogger(__name__)
 
 RESPONSE_CACHE_TTL = 60 * 60 * 6  # 6 hours
+STATIONS_CACHE_TTL = 60 * 60 * 24  # 24 hours
 
 
 def health(_request):
@@ -29,10 +31,85 @@ def map_page(request):
     return render(request, "map.html")
 
 
-def _route_cache_key(start: str, finish: str) -> str:
-    # v3: faster station index + UI refresh
-    raw = f"v3|{start.strip().lower()}|{finish.strip().lower()}"
+def all_stations(request):
+    """
+    GET /api/stations/
+
+    Returns every geocoded fuel station as a GeoJSON FeatureCollection so the
+    UI can plot the full dataset on demand. No external map/routing calls — the
+    stations are pre-geocoded locally to City+State centroids.
+    """
+    cache_key = "stations:geojson:v1"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return JsonResponse(cached)
+
+    features = [
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [s.longitude, s.latitude],
+            },
+            "properties": {
+                "opis_id": s.opis_id,
+                "name": s.name,
+                "address": s.address,
+                "city": s.city,
+                "state": s.state,
+                "retail_price_usd": round(s.retail_price, 3),
+            },
+        }
+        for s in get_geocoded_stations()
+    ]
+    payload = {
+        "type": "FeatureCollection",
+        "count": len(features),
+        "features": features,
+    }
+    cache.set(cache_key, payload, timeout=STATIONS_CACHE_TTL)
+    return JsonResponse(payload)
+
+
+def _route_cache_key(start: str, finish: str, start_gallons: float | None) -> str:
+    # v4: starting-fuel aware + simpler payload
+    fuel = "full" if start_gallons is None else f"{start_gallons:.1f}"
+    raw = f"v4|{start.strip().lower()}|{finish.strip().lower()}|{fuel}"
     return "route_response:" + hashlib.sha256(raw.encode()).hexdigest()[:40]
+
+
+def _parse_gallons(raw, tank_gallons: float) -> float | None:
+    """Parse the driver's current fuel (gallons). None means a full tank."""
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(value, tank_gallons))
+
+
+def _other_stations(along, chosen_opis_ids) -> list[dict]:
+    """Route-nearby stations that were NOT chosen as fuel stops."""
+    seen: set[int] = set()
+    others: list[dict] = []
+    for rs in along:
+        s = rs.station
+        if s.opis_id in chosen_opis_ids or s.opis_id in seen:
+            continue
+        seen.add(s.opis_id)
+        others.append(
+            {
+                "name": s.name,
+                "location": f"{s.city}, {s.state}",
+                "price_per_gallon_usd": round(s.retail_price, 3),
+                "miles_from_start": round(rs.distance_along_miles, 1),
+                "latitude": s.latitude,
+                "longitude": s.longitude,
+            }
+        )
+    others.sort(key=lambda o: o["miles_from_start"])
+    return others
 
 
 def _hours_minutes(seconds: float) -> str:
@@ -105,15 +182,17 @@ class RouteFuelView(View):
                 status=400,
             )
 
-        cache_key = _route_cache_key(start, finish)
+        tank_gallons = settings.VEHICLE_MAX_RANGE_MILES / settings.VEHICLE_MPG
+        start_gallons = _parse_gallons(params.get("start_gallons"), tank_gallons)
+        start_range_miles = (
+            None if start_gallons is None else start_gallons * settings.VEHICLE_MPG
+        )
+
+        cache_key = _route_cache_key(start, finish, start_gallons)
         cached = cache.get(cache_key)
         if cached is not None:
             payload = dict(cached)
-            payload["cache"] = {
-                "response_cache_hit": True,
-                "external_api_calls": 0,
-                "note": "Full result served from cache — no map/routing HTTP calls.",
-            }
+            payload["cache"] = {"response_cache_hit": True, "external_api_calls": 0}
             return JsonResponse(payload)
 
         api_calls = 0
@@ -128,7 +207,7 @@ class RouteFuelView(View):
 
             _coords, along = stations_along_route(route["polyline"])
             stops, total_cost, gallons = plan_fuel_stops(
-                along, route["distance_miles"]
+                along, route["distance_miles"], start_range_miles=start_range_miles
             )
         except ExternalServiceError as exc:
             return JsonResponse({"error": str(exc)}, status=502)
@@ -150,13 +229,19 @@ class RouteFuelView(View):
             f"%3B{finish_ll[0]}%2C{finish_ll[1]}"
         )
 
-        summary = (
-            f"Drive {distance} miles from {start} to {finish} "
-            f"({_hours_minutes(route['duration_seconds'])}). "
-            f"At {settings.VEHICLE_MPG} mpg you need about {gallons} gallons. "
-            f"Optimal fuel plan uses {len(readable_stops)} stop(s) "
-            f"for a total fuel cost of ${total_cost:.2f}."
-        )
+        if readable_stops:
+            summary = (
+                f"{distance} mi, {_hours_minutes(route['duration_seconds'])}. "
+                f"{len(readable_stops)} fuel stop(s), total ${total_cost:.2f}."
+            )
+        else:
+            summary = (
+                f"{distance} mi, {_hours_minutes(route['duration_seconds'])}. "
+                "You already have enough fuel — no stops needed."
+            )
+
+        chosen_opis_ids = {s["opis_id"] for s in readable_stops}
+        other_stations = _other_stations(along, chosen_opis_ids)
 
         stop_features = [
             {
@@ -198,24 +283,16 @@ class RouteFuelView(View):
                 "duration_text": _hours_minutes(route["duration_seconds"]),
                 "map_url": map_url,
                 "polyline": route["polyline"],
-                "how_to_use_polyline": (
-                    "Decode this Google/OSRM-encoded polyline (precision 5) "
-                    "into lat/lng points to draw the driving path on a map."
-                ),
             },
             "fuel_plan": {
+                "start_fuel_gallons": start_gallons,
                 "gallons_needed": gallons,
                 "total_fuel_cost_usd": total_cost,
                 "total_fuel_cost_text": f"${total_cost:.2f}",
                 "number_of_fuel_stops": len(readable_stops),
-                "strategy": (
-                    "Cost-effective: always prefer the lowest $/gal among stations "
-                    "you can reach before the tank runs out. Fill up at cheap stations "
-                    "when later fuel is more expensive; if cheaper fuel is ahead, "
-                    "buy only enough to get there."
-                ),
                 "fuel_stops": readable_stops,
             },
+            "other_stations": other_stations,
             "map_geojson": {
                 "type": "FeatureCollection",
                 "features": [
@@ -241,21 +318,10 @@ class RouteFuelView(View):
             "cache": {
                 "response_cache_hit": False,
                 "external_api_calls": api_calls,
-                "geocode_start": start_meta,
-                "geocode_finish": finish_meta,
-                "routing": route_meta,
-                "note": (
-                    "Ideal: 1 OSRM routing call. Acceptable: up to 3 total. "
-                    "Stations never call the map API — they are pre-geocoded locally."
-                ),
             },
             "meta": {
                 "stations_considered_on_route": len(along),
-                "routing_provider": "OSRM (router.project-osrm.org)",
-                "station_coordinates": (
-                    "Fuel CSV has exit-style addresses (no lat/lng). "
-                    "Stations use City+State centroids from data/us_cities.csv."
-                ),
+                "stations_not_chosen": len(other_stations),
             },
         }
 

@@ -1,0 +1,49 @@
+{
+  "info": {
+    "name": "FuelRoute",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8000" }
+  ],
+  "item": [
+    {
+      "name": "Route + fuel plan",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/api/route/?start=Chicago, IL&finish=Dallas, TX&start_gallons=50",
+          "host": ["{{base_url}}"],
+          "path": ["api", "route", ""],
+          "query": [
+            { "key": "start", "value": "Chicago, IL" },
+            { "key": "finish", "value": "Dallas, TX" },
+            { "key": "start_gallons", "value": "50" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "All stations",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/api/stations/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "stations", ""]
+        }
+      }
+    },
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/health/",
+          "host": ["{{base_url}}"],
+          "path": ["health", ""]
+        }
+      }
+    }
+  ]
+}

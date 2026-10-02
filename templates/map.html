@@ -108,6 +108,26 @@
     }
     button:hover { filter: brightness(1.05); }
     button:disabled { opacity: 0.65; cursor: wait; }
+    button.secondary {
+      width: 100%;
+      margin: 0.6rem 0 0.2rem;
+      color: var(--brand);
+      background: #fff;
+      border: 1px solid var(--brand);
+      box-shadow: none;
+    }
+    button.secondary.active {
+      color: #fff;
+      background: var(--brand);
+    }
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #9ca3af;
+      border: 2px solid #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
     .error {
       margin-top: 0.85rem;
       color: #9f1239;
@@ -271,6 +291,9 @@
         <label>To
           <input name="finish" value="Dallas, TX" required placeholder="City, ST or full address" />
         </label>
+        <label>Fuel now (gallons, tank 50)
+          <input name="start_gallons" type="number" min="0" max="50" step="1" value="50" />
+        </label>
         <div class="examples">
           Fast: <code>Chicago, IL</code> &nbsp; Detailed: <code>Millennium Park, Chicago, IL</code>
         </div>
@@ -286,6 +309,8 @@
           <div class="cost"><span>Total cost</span><b id="cost">-</b></div>
         </div>
 
+        <button type="button" id="toggle-others" class="secondary">Show other stations</button>
+
         <div class="panel">
           <h2>Fuel stops — tap a row to zoom the map</h2>
           <div id="stop-list"></div>
@@ -293,9 +318,8 @@
       </div>
 
       <div class="help">
-        <strong>How it works:</strong> We load fuel prices from the CSV, place each station
-        near its city, draw one driving route, then pick the lowest $/gal stops you can
-        reach before the tank runs empty.
+        <strong>How it works:</strong> we draw your route, then pick the cheapest
+        stations you can reach before fuel runs out. Set how much fuel you start with.
       </div>
     </aside>
 
@@ -336,18 +360,60 @@
     }
 
     const map = L.map("map", { zoomControl: true }).setView([39.5, -98.35], 4);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 18,
-      attribution: "&copy; OpenStreetMap",
-    }).addTo(map);
+    // Esri World Street Map: free, no API key, and not subject to the
+    // OpenStreetMap tile usage-policy block that the default OSM tiles hit.
+    L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+      {
+        maxZoom: 19,
+        attribution:
+          'Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, &copy; OpenStreetMap contributors',
+      }
+    ).addTo(map);
     const layerGroup = L.layerGroup().addTo(map);
+    const othersLayer = L.layerGroup();
     const markersByStop = {};
+    let otherStations = [];
 
     const form = document.getElementById("form");
     const errorEl = document.getElementById("error");
     const results = document.getElementById("results");
     const mapEmpty = document.getElementById("map-empty");
     const go = document.getElementById("go");
+    const toggleOthers = document.getElementById("toggle-others");
+
+    function dotIcon() {
+      return L.divIcon({ className: "", html: `<div class="dot"></div>`, iconSize: [12, 12] });
+    }
+
+    function hideOthers() {
+      othersLayer.clearLayers();
+      map.removeLayer(othersLayer);
+      toggleOthers.classList.remove("active");
+      toggleOthers.textContent = "Show other stations";
+    }
+
+    function showOthers() {
+      othersLayer.clearLayers();
+      otherStations.forEach((s) => {
+        L.marker([s.latitude, s.longitude], { icon: dotIcon() })
+          .bindPopup(
+            `<strong>${s.name}</strong><br/>${s.location}` +
+            `<br/>$${s.price_per_gallon_usd.toFixed(3)}/gal · mile ${s.miles_from_start}` +
+            `<br/><em>Not chosen</em>`
+          )
+          .addTo(othersLayer);
+      });
+      othersLayer.addTo(map);
+      toggleOthers.classList.add("active");
+      toggleOthers.textContent = `Hide other stations (${otherStations.length})`;
+    }
+
+    toggleOthers.addEventListener("click", () => {
+      if (!otherStations.length) return;
+      if (map.hasLayer(othersLayer)) hideOthers();
+      else showOthers();
+    });
 
     function showError(msg) {
       errorEl.textContent = msg;
@@ -373,12 +439,14 @@
 
       const start = form.start.value.trim();
       const finish = form.finish.value.trim();
+      const startGallons = form.start_gallons.value.trim();
 
       try {
         const t0 = performance.now();
-        const res = await fetch(
-          `/api/route/?start=${encodeURIComponent(start)}&finish=${encodeURIComponent(finish)}`
-        );
+        let url =
+          `/api/route/?start=${encodeURIComponent(start)}&finish=${encodeURIComponent(finish)}`;
+        if (startGallons !== "") url += `&start_gallons=${encodeURIComponent(startGallons)}`;
+        const res = await fetch(url);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Request failed");
 
@@ -420,6 +488,12 @@
         results.classList.remove("hidden");
         mapEmpty.classList.add("hide");
         layerGroup.clearLayers();
+        hideOthers();
+        otherStations = data.other_stations || [];
+        toggleOthers.disabled = otherStations.length === 0;
+        toggleOthers.textContent = otherStations.length
+          ? `Show other stations (${otherStations.length})`
+          : "No other stations nearby";
         Object.keys(markersByStop).forEach((k) => delete markersByStop[k]);
 
         const latlngs = decodePolyline(data.route.polyline);
